@@ -10,6 +10,42 @@ SOURCEGRAPH_URL = os.getenv(
 ).rstrip("/")
 
 SOURCEGRAPH_TOKEN = os.getenv("SG_TOKEN", "")
+SOURCEGRAPH_REPOSITORY = os.getenv(
+    "SOURCEGRAPH_REPOSITORY",
+    "github.com/Hitesh-Sunkari/devpulse-nexus_windows",
+).strip()
+
+
+def sourcegraph_status():
+    """Expose connection state without leaking tokens or response details."""
+    try:
+        _request("type:file count:1")
+        return {
+            "available": True,
+            "authenticated": True,
+            "message": "Sourcegraph GraphQL search is connected.",
+        }
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return {
+                "available": True,
+                "authenticated": False,
+                "message": (
+                    "Sourcegraph is running but DevPulse needs a Sourcegraph "
+                    "access token in SG_TOKEN to retrieve repository evidence."
+                ),
+            }
+        return {
+            "available": False,
+            "authenticated": bool(SOURCEGRAPH_TOKEN),
+            "message": f"Sourcegraph returned HTTP {exc.code}.",
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "authenticated": bool(SOURCEGRAPH_TOKEN),
+            "message": f"Sourcegraph is unavailable: {exc}",
+        }
 
 
 def _request(query):
@@ -64,7 +100,13 @@ def _request(query):
 
 
 def search_sourcegraph(query, limit=8):
-    queries = [query.strip()]
+    def scoped(value):
+        value = value.strip()
+        if SOURCEGRAPH_REPOSITORY and "repo:" not in value:
+            return f"repo:{SOURCEGRAPH_REPOSITORY} {value}"
+        return value
+
+    queries = [scoped(query)]
 
     # Natural-language questions often search poorly in Sourcegraph.
     # Extract identifiers/file names and use those as a fallback.
@@ -80,13 +122,29 @@ def search_sourcegraph(query, limit=8):
             or "." in x
             or x in {
                 "FastAPI", "Docker", "ChromaDB",
-                "Ollama", "Sourcegraph", "RAG",
+                "Ollama", "Sourcegraph", "RAG", "Digital",
             }
         )
     ]
 
     if useful:
-        queries.append(" OR ".join(useful[:6]))
+        queries.append(scoped(" OR ".join(useful[:6])))
+
+    # Map common natural-language concepts to the identifiers used in this
+    # repository. This makes questions such as “what is Digital Twin for?”
+    # retrieve actual implementation evidence once the repository is indexed.
+    lowered = query.lower()
+    concept_queries = []
+    if "digital twin" in lowered:
+        concept_queries.append("get_digital_twin OR digital_twin")
+    if "docker telemetry" in lowered or "docker" in lowered:
+        concept_queries.append("get_docker_metrics OR docker_monitor")
+    if "rag" in lowered or "knowledge" in lowered:
+        concept_queries.append("retrieve_context OR vector_store")
+    for concept_query in concept_queries:
+        scoped_query = scoped(concept_query)
+        if scoped_query not in queries:
+            queries.append(scoped_query)
 
     seen = set()
     sources = []

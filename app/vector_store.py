@@ -1,10 +1,12 @@
+import os
+
 import chromadb
 
-from chunking import load_document, chunk_text
-from embeddings import create_embeddings
+from app.chunking import load_document, chunk_text
+from app.embeddings import create_embeddings
 
 
-DB_PATH = "./chroma_db"
+DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
 
 
 def build_vector_store():

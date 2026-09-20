@@ -1,11 +1,14 @@
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 import json
 import os
 import platform
+import re
+import threading
 import time
+import uuid
 from datetime import datetime
 
 import psutil
@@ -15,6 +18,7 @@ from app.rag import retrieve_context
 from app.orchestrator import orchestrate_request
 from app.docker_monitor import get_docker_metrics
 from app.telemetry_history import record_telemetry, get_history
+from app.sourcegraph import search_sourcegraph, sourcegraph_status
 
 
 # ============================================================
@@ -64,10 +68,11 @@ RAG_RESULTS = 2
 # Maximum time allowed for Ollama to respond.
 OLLAMA_TIMEOUT = 120
 
-# Conservative Docker container memory signal.
-# A container using >= 20% of its Docker memory limit is
-# considered potentially significant.
-SIGNIFICANT_CONTAINER_MEMORY_PERCENT = 20.0
+# A single container must consume a meaningful share of the Docker/WSL memory
+# budget before it is reported as a possible host-memory contributor. Docker's
+# ``MemPerc`` measures usage against a *container limit*, which can be as small
+# as 50 MiB; it must not be treated as a percentage of host memory.
+SIGNIFICANT_HOST_MEMORY_SHARE_PERCENT = 5.0
 
 
 # ============================================================
@@ -188,6 +193,36 @@ def parse_memory_percentage(value):
         return 0.0
 
 
+def parse_memory_usage_bytes(value):
+    """Read the used side of Docker's ``used / limit`` memory display."""
+    match = re.match(
+        r"\s*([0-9]+(?:\.[0-9]+)?)\s*([kmgtpe]?i?b|b)",
+        str(value or ""),
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return 0
+
+    amount = float(match.group(1))
+    unit = match.group(2).lower()
+    multipliers = {
+        "b": 1,
+        "kb": 1000,
+        "mb": 1000 ** 2,
+        "gb": 1000 ** 3,
+        "tb": 1000 ** 4,
+        "pb": 1000 ** 5,
+        "eb": 1000 ** 6,
+        "kib": 1024,
+        "mib": 1024 ** 2,
+        "gib": 1024 ** 3,
+        "tib": 1024 ** 4,
+        "pib": 1024 ** 5,
+        "eib": 1024 ** 6,
+    }
+    return int(amount * multipliers.get(unit, 1))
+
+
 # ============================================================
 # DETERMINISTIC DIAGNOSIS
 # ============================================================
@@ -276,6 +311,8 @@ def build_diagnosis(digital_twin):
 
     container_memory = []
     significant_containers = []
+    host_memory_total_bytes = int(float(memory.get("total_gb", 0) or 0) * (1024 ** 3))
+    total_container_memory_bytes = 0
 
     for container in containers:
 
@@ -290,18 +327,24 @@ def build_diagnosis(digital_twin):
         )
 
         memory_percent_raw = container.get(
-            "memory_percent",
+            "memory_percent_of_limit",
             "0%",
         )
 
-        memory_percent = parse_memory_percentage(
-            memory_percent_raw
+        memory_usage_bytes = parse_memory_usage_bytes(memory_usage)
+        total_container_memory_bytes += memory_usage_bytes
+        host_memory_share_percent = (
+            round(100 * memory_usage_bytes / host_memory_total_bytes, 2)
+            if host_memory_total_bytes else None
         )
 
         container_info = {
             "name": name,
             "memory_usage": memory_usage,
-            "memory_percent": memory_percent_raw,
+            # This is usage relative to the Docker container's configured
+            # limit, not relative to the host. It is displayed as such in UI.
+            "memory_percent_of_limit": memory_percent_raw,
+            "host_memory_share_percent": host_memory_share_percent,
         }
 
         container_memory.append(
@@ -309,18 +352,18 @@ def build_diagnosis(digital_twin):
         )
 
         # ----------------------------------------------------
-        # Conservative container signal
+        # Use absolute usage, not Docker's percentage-of-container-limit.
         # ----------------------------------------------------
 
-        if (
-            memory_percent
-            >= SIGNIFICANT_CONTAINER_MEMORY_PERCENT
+        if host_memory_share_percent is not None and (
+            host_memory_share_percent >= SIGNIFICANT_HOST_MEMORY_SHARE_PERCENT
         ):
 
             significant_containers.append(
                 {
                     "name": name,
-                    "memory_percent": memory_percent,
+                    "memory_usage": memory_usage,
+                    "host_memory_share_percent": host_memory_share_percent,
                 }
             )
 
@@ -330,22 +373,25 @@ def build_diagnosis(digital_twin):
 
     if significant_containers:
 
+        total_docker_memory_share_percent = round(
+            100 * total_container_memory_bytes / host_memory_total_bytes,
+            2,
+        ) if host_memory_total_bytes else None
+
         return {
             "docker_status": "available",
             "running_containers": container_count,
             "docker_container_memory": container_memory,
             "host_memory_usage_percent": host_memory_usage,
+            "docker_memory_share_percent": total_docker_memory_share_percent,
             "docker_is_evidently_responsible": "potentially",
             "assessment": "potentially_significant",
             "significant_containers": significant_containers,
             "reason": (
-                "One or more Docker containers show "
-                "comparatively high memory utilization "
-                "relative to their configured Docker "
-                "memory limit. Docker may be contributing "
-                "to resource pressure, but the available "
-                "telemetry does not prove that Docker is "
-                "the sole cause of host memory usage."
+                "One or more Docker containers consume a material share of "
+                "the Docker/WSL memory budget at this snapshot. Docker may "
+                "be contributing to memory pressure, but this telemetry does "
+                "not prove that Docker is the sole cause of host memory use."
             ),
         }
 
@@ -358,14 +404,18 @@ def build_diagnosis(digital_twin):
         "running_containers": container_count,
         "docker_container_memory": container_memory,
         "host_memory_usage_percent": host_memory_usage,
+        "docker_memory_share_percent": round(
+            100 * total_container_memory_bytes / host_memory_total_bytes,
+            2,
+        ) if host_memory_total_bytes else None,
         "docker_is_evidently_responsible": False,
         "assessment": "unlikely",
         "significant_containers": [],
         "reason": (
             "Docker containers are running, but their "
-            "observed memory utilization is low. Docker "
-            "is therefore unlikely to be the primary "
-            "cause of the current host memory usage."
+            "absolute memory usage is below five percent of the Docker/WSL "
+            "memory budget each. Docker is therefore unlikely to be the "
+            "primary cause of the current host memory usage."
         ),
     }
 
@@ -410,6 +460,7 @@ def build_prompt(
     digital_twin,
     diagnosis,
     documents,
+    sourcegraph_sources=None,
 ):
     """
     Build a grounded prompt.
@@ -418,21 +469,72 @@ def build_prompt(
     authoritative.
     """
 
+    # Keep local CPU inference responsive. Two concise, relevant pieces of
+    # knowledge are more useful than a full document dump, especially to Phi-3
+    # and TinyLlama.
+    documents = (documents or [])[:2]
     context = (
-        "\n\n".join(documents)
+        "\n\n".join(document[:700] for document in documents)
         if documents
         else "No relevant knowledge was retrieved."
     )
 
-    telemetry_json = json.dumps(
-        digital_twin,
-        indent=2,
-    )
+    sourcegraph_sources = sourcegraph_sources or []
+    repository_evidence = "\n".join(
+        f"- {item.get('repository', 'repository')}/"
+        f"{item.get('path', 'unknown')}:{item.get('line', '?')} — "
+        f"{item.get('preview', '')}"
+        for item in sourcegraph_sources[:4]
+    ) or "No Sourcegraph repository evidence was available."
 
-    diagnosis_json = json.dumps(
-        diagnosis,
-        indent=2,
-    )
+    runtime_terms = {
+        "container", "cpu", "disk", "docker", "environment", "memory",
+        "metric", "monitor", "performance", "resource", "runtime", "telemetry",
+    }
+    question_terms = {
+        word.lower().strip(".,?!") for word in question.split()
+    }
+    needs_runtime_context = bool(question_terms & runtime_terms)
+
+    if needs_runtime_context:
+        docker = digital_twin.get("docker", {})
+        containers = docker.get("containers", [])
+        # Docker values arrive as display strings (for example "12.4%").
+        # Sorting them for the prompt makes the most relevant live evidence
+        # visible without forcing a small local model through every container.
+        def memory_usage(item):
+            return parse_memory_usage_bytes(item.get("memory_usage"))
+
+        telemetry_for_prompt = {
+            "system": digital_twin.get("system", {}),
+            "docker": {
+                "available": docker.get("available", False),
+                "container_count": docker.get("container_count", 0),
+                "source": docker.get("source"),
+                "top_memory_containers": sorted(
+                    containers, key=memory_usage, reverse=True
+                )[:4],
+            },
+        }
+        diagnosis_for_prompt = {
+            key: diagnosis.get(key)
+            for key in (
+                "docker_status", "running_containers", "host_memory_usage_percent",
+                "docker_is_evidently_responsible", "assessment",
+                "significant_containers", "reason",
+            )
+            if key in diagnosis
+        }
+    else:
+        telemetry_for_prompt = {
+            "note": "The user asked an architecture/function question; no runtime diagnosis is required."
+        }
+        diagnosis_for_prompt = {
+            "note": "Do not infer runtime causes for an architecture/function question."
+        }
+
+    telemetry_json = json.dumps(telemetry_for_prompt, indent=2)
+    diagnosis_json = json.dumps(diagnosis_for_prompt, indent=2)
 
     return f"""
 You are DevPulse Nexus.
@@ -530,6 +632,12 @@ RETRIEVED TECHNICAL KNOWLEDGE
 {context}
 
 ============================================================
+SOURCEGRAPH REPOSITORY EVIDENCE
+============================================================
+
+{repository_evidence}
+
+============================================================
 USER QUESTION
 ============================================================
 
@@ -539,28 +647,24 @@ USER QUESTION
 RESPONSE FORMAT
 ============================================================
 
-OBSERVED:
+Start with a direct answer to the user's question in one or two sentences.
 
-- Describe only relevant live telemetry.
-- Mention Docker/container state when relevant.
+Then use short sections only when they add value:
 
-LIKELY CAUSE:
+EVIDENCE:
+- Cite relevant telemetry values, RAG knowledge, or Sourcegraph paths.
+- Do not mention a source that is not supplied above.
 
-- Explain what the telemetry supports.
-- Do not invent a cause.
-- If the exact cause is unknown, say so.
-- Do not blame Docker without telemetry evidence.
+INTERPRETATION:
+- Explain what the supplied evidence supports.
+- If evidence is insufficient, say exactly what is not established.
 
-RECOMMENDATION:
+NEXT STEP:
+- Give one or two practical actions only when useful.
 
-- Give practical troubleshooting steps.
-- Use retrieved knowledge where relevant.
-- Do not recommend actions unsupported by the
-  available information.
-
-Keep the response concise and technically useful.
-
-Never contradict the deterministic diagnosis.
+For questions about architecture or a function, explain the function's role
+before discussing current telemetry. For diagnostics, distinguish observed
+facts from likely causes. Keep the answer concise, specific, and useful.
 """
 
 
@@ -568,7 +672,7 @@ Never contradict the deterministic diagnosis.
 # OLLAMA
 # ============================================================
 
-def ask_ollama(prompt):
+def ask_ollama(prompt, model=None):
     """
     Send the grounded prompt to the local Ollama model.
 
@@ -584,7 +688,7 @@ def ask_ollama(prompt):
         OLLAMA_URL,
 
         json={
-            "model": OLLAMA_MODEL,
+            "model": model or OLLAMA_MODEL,
             "prompt": prompt,
             "stream": False,
 
@@ -649,6 +753,40 @@ def health():
         "version": "1.0.0",
         "ollama_model": OLLAMA_MODEL,
         "ollama_url": OLLAMA_URL,
+    }
+
+
+@app.get("/models")
+def models():
+    """Expose models installed in Ollama for the Ask Nexus picker."""
+    available = list_available_models()
+    return {
+        "available": bool(available),
+        "default": OLLAMA_MODEL,
+        "models": available,
+    }
+
+
+@app.get("/pipeline-status")
+def pipeline_status():
+    """Live readiness for the telemetry, retrieval, and inference flow."""
+    twin = get_digital_twin()
+    record_telemetry(twin)
+    return {
+        "timestamp": twin["timestamp"],
+        "telemetry": {
+            "available": True,
+            "docker": twin.get("docker", {}),
+        },
+        "rag": {
+            "available": True,
+            "collection": "devpulse_knowledge",
+        },
+        "sourcegraph": sourcegraph_status(),
+        "models": {
+            "available": list_available_models(),
+            "default": OLLAMA_MODEL,
+        },
     }
 
 
@@ -732,9 +870,17 @@ def diagnosis():
 # ============================================================
 
 @app.get("/ask")
-def ask(question: str):
+def ask(question: str, model: str | None = None):
 
     question = question.strip()
+    available_models = list_available_models()
+    selected_model = model or OLLAMA_MODEL
+
+    if selected_model not in available_models:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model '{selected_model}' is not currently installed in Ollama.",
+        )
 
     # --------------------------------------------------------
     # Validate question
@@ -757,7 +903,7 @@ def ask(question: str):
             "sources": [],
 
             "ai": {
-                "model": OLLAMA_MODEL,
+                "model": selected_model,
                 "latency_seconds": None,
                 "error": None,
             },
@@ -793,6 +939,10 @@ def ask(question: str):
     )
 
     documents = orchestration["retrieved_context"]
+    try:
+        repository_sources = search_sourcegraph(question, limit=8)
+    except Exception:
+        repository_sources = []
 
     # --------------------------------------------------------
     # 4. Build grounded prompt
@@ -803,6 +953,7 @@ def ask(question: str):
         digital_twin=digital_twin,
         diagnosis=diagnosis,
         documents=documents,
+        sourcegraph_sources=repository_sources,
     )
 
     # --------------------------------------------------------
@@ -815,7 +966,8 @@ def ask(question: str):
     try:
 
         answer, latency = ask_ollama(
-            prompt
+            prompt,
+            selected_model,
         )
 
     except requests.exceptions.Timeout:
@@ -842,7 +994,7 @@ def ask(question: str):
         answer = (
             "The local AI model is unavailable. "
             "Make sure the Ollama container is running "
-            f"and model '{OLLAMA_MODEL}' is available."
+                f"and model '{selected_model}' is available."
         )
 
     except requests.exceptions.HTTPError as exc:
@@ -894,8 +1046,13 @@ def ask(question: str):
 
         "sources": documents,
 
+        "sourcegraph": {
+            "status": sourcegraph_status(),
+            "results": repository_sources,
+        },
+
         "ai": {
-            "model": OLLAMA_MODEL,
+            "model": selected_model,
             "latency_seconds": latency,
             "error": ai_error,
         },
@@ -914,7 +1071,11 @@ from app.context import (
     build_context,
     build_combined_prompt,
 )
-from app.model_runner import run_all_models
+from app.model_runner import (
+    OLLAMA_MODELS,
+    list_available_models,
+    run_all_models,
+)
 from app.evaluator import evaluate_all
 from app.comparison import (
     compare_models,
@@ -924,6 +1085,191 @@ from app.comparison import (
 
 class CompareRequest(_Week5BaseModel):
     question: str
+
+
+_comparison_jobs = {}
+_comparison_lock = threading.Lock()
+
+
+def _job_update(job_id, stage, state, message, extra=None):
+    event = {
+        "timestamp": now_iso(),
+        "stage": stage,
+        "state": state,
+        "message": message,
+    }
+    if extra:
+        event.update(extra)
+
+    with _comparison_lock:
+        job = _comparison_jobs.get(job_id)
+        if not job:
+            return
+        job["events"].append(event)
+        job["current_stage"] = stage
+        job["state"] = state
+
+
+def _job_result(job_id, result):
+    with _comparison_lock:
+        job = _comparison_jobs.get(job_id)
+        if job:
+            job["state"] = "complete"
+            job["current_stage"] = "complete"
+            job["result"] = result
+            job["events"].append({
+                "timestamp": now_iso(),
+                "stage": "complete",
+                "state": "complete",
+                "message": "Live comparison completed.",
+            })
+
+
+def _job_error(job_id, message):
+    with _comparison_lock:
+        job = _comparison_jobs.get(job_id)
+        if job:
+            job["state"] = "failed"
+            job["current_stage"] = "failed"
+            job["error"] = message
+            job["events"].append({
+                "timestamp": now_iso(),
+                "stage": "failed",
+                "state": "failed",
+                "message": message,
+            })
+
+
+def _run_comparison_job(job_id, question):
+    """Run the real model evaluation and publish stage changes for the UI."""
+    try:
+        _job_update(job_id, "telemetry", "running", "Collecting Digital Twin telemetry.")
+        twin = get_digital_twin()
+        record_telemetry(twin)
+        diagnosis = build_diagnosis(twin)
+        _job_update(
+            job_id,
+            "telemetry",
+            "complete",
+            "Digital Twin and Docker telemetry captured.",
+            {"docker_available": twin.get("docker", {}).get("available", False)},
+        )
+
+        _job_update(job_id, "retrieval", "running", "Retrieving RAG knowledge and Sourcegraph evidence.")
+        context = build_context(question)
+        documents = context.get("rag", [])
+        sources = context.get("sourcegraph", [])
+        sourcegraph = sourcegraph_status()
+        evaluation_context = {
+            **context,
+            "telemetry": twin,
+            "diagnosis": diagnosis,
+        }
+        _job_update(
+            job_id,
+            "retrieval",
+            "complete",
+            "RAG retrieval and Sourcegraph search completed.",
+            {"rag_documents": len(documents), "sourcegraph_results": len(sources)},
+        )
+
+        selected_models = [
+            model for model in OLLAMA_MODELS
+            if model in list_available_models()
+        ]
+        if not selected_models:
+            raise RuntimeError("No requested comparison models are installed in Ollama.")
+
+        prompt = build_prompt(
+            question=question,
+            digital_twin=twin,
+            diagnosis=diagnosis,
+            documents=documents,
+            sourcegraph_sources=sources,
+        )
+
+        def on_progress(model, state, response):
+            message = (
+                f"{model} is generating an evidence-grounded answer."
+                if state == "running"
+                else f"{model} completed."
+            )
+            _job_update(
+                job_id,
+                "models",
+                "running" if state == "running" else "complete",
+                message,
+                {"model": model, "model_state": state},
+            )
+
+        _job_update(job_id, "models", "running", "Running local models sequentially.")
+        responses = run_all_models(prompt, selected_models, on_progress)
+
+        _job_update(job_id, "evaluation", "running", "Scoring live answers against retrieved evidence.")
+        category = classify_question(question)
+        evaluated = evaluate_all(
+            question,
+            category,
+            responses,
+            evaluation_context,
+        )
+        comparison = compare_models(evaluated, category)
+        _job_update(job_id, "evaluation", "complete", "Seven-category scoring and best-model selection completed.")
+
+        _job_result(job_id, {
+            "question": question,
+            "category": category,
+            "models": evaluated,
+            "comparison": comparison,
+            "telemetry": twin,
+            "diagnosis": diagnosis,
+            "sourcegraph": {
+                "status": sourcegraph,
+                "results": sources,
+            },
+            "rag": {
+                "documents": documents,
+                "count": len(documents),
+            },
+        })
+    except Exception as exc:
+        _job_error(job_id, str(exc))
+
+
+@app.post("/comparison-jobs")
+def create_comparison_job(request: CompareRequest, background_tasks: BackgroundTasks):
+    question = request.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question cannot be empty.")
+
+    job_id = uuid.uuid4().hex
+    with _comparison_lock:
+        _comparison_jobs[job_id] = {
+            "id": job_id,
+            "question": question,
+            "state": "queued",
+            "current_stage": "queued",
+            "events": [{
+                "timestamp": now_iso(),
+                "stage": "queued",
+                "state": "queued",
+                "message": "Comparison queued.",
+            }],
+            "result": None,
+            "error": None,
+        }
+
+    background_tasks.add_task(_run_comparison_job, job_id, question)
+    return {"id": job_id, "state": "queued"}
+
+
+@app.get("/comparison-jobs/{job_id}")
+def get_comparison_job(job_id: str):
+    with _comparison_lock:
+        job = _comparison_jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Comparison job not found.")
+        return json.loads(json.dumps(job))
 
 
 @app.get("/evaluation-history")

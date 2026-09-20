@@ -1,11 +1,15 @@
 import json
+import os
 import threading
 from collections import deque
 from datetime import datetime
 from pathlib import Path
 
 
-HISTORY_FILE = Path(__file__).resolve().parent.parent / "telemetry_history.json"
+HISTORY_FILE = Path(os.getenv(
+    "TELEMETRY_HISTORY_PATH",
+    Path(__file__).resolve().parent.parent / "telemetry_history.json",
+))
 
 MAX_RECORDS = 720
 
@@ -31,6 +35,7 @@ def _load_history():
 
 def _save_history():
     try:
+        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
         temporary_file = HISTORY_FILE.with_suffix(".tmp")
 
         with open(temporary_file, "w", encoding="utf-8") as file:

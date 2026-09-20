@@ -1,41 +1,101 @@
 services:
   devpulse:
     build: .
+    image: devpulse-nexus:local
     container_name: devpulse-nexus
     ports:
       - "8000:8000"
 
     environment:
-      - SG_TOKEN=${SG_TOKEN}
-      - SOURCEGRAPH_URL=http://host.docker.internal:7080
+      - SG_TOKEN=${SG_TOKEN:-}
+      # Sourcegraph is deployed separately using its supported deployment
+      # stack, and is reachable from Docker Desktop through this host alias.
+      - SOURCEGRAPH_URL=${SOURCEGRAPH_URL:-http://host.docker.internal}
+      - SOURCEGRAPH_REPOSITORY=${SOURCEGRAPH_REPOSITORY:-github.com/Hitesh-Sunkari/devpulse-nexus_windows}
       - OLLAMA_URL=http://ollama:11434
       - OLLAMA_MODEL=qwen2.5:1.5b
+      - OLLAMA_TIMEOUT=300
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - TELEMETRY_HISTORY_PATH=/app/runtime/telemetry_history.json
+      - OPENBLAS_NUM_THREADS=1
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
 
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
     volumes:
-      - .:/app
-      - backup_data:/backup
       - /var/run/docker.sock:/var/run/docker.sock
-      - /usr/bin/docker:/usr/bin/docker:ro
+      - chroma_data:/app/chroma_db
+      - huggingface_cache:/root/.cache/huggingface
+      - telemetry_data:/app/runtime
 
     depends_on:
-      - ollama
+      ollama-init:
+        condition: service_completed_successfully
+      rag-init:
+        condition: service_completed_successfully
 
   ollama:
     image: ollama/ollama:latest
     container_name: devpulse-ollama
     volumes:
       - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: devpulse-ollama-init
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        ollama pull qwen2.5:1.5b &&
+        ollama pull phi3:mini &&
+        ollama pull tinyllama
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  rag-init:
+    image: devpulse-nexus:local
+    container_name: devpulse-rag-init
+    command: ["python", "-m", "app.vector_store"]
+    environment:
+      - OPENBLAS_NUM_THREADS=1
+      - OMP_NUM_THREADS=1
+      - MKL_NUM_THREADS=1
+    volumes:
+      - chroma_data:/app/chroma_db
+      - huggingface_cache:/root/.cache/huggingface
 
   backup:
-    build: ./backup
-    container_name: devpulse-backup
+    image: devpulse-nexus:local
+    container_name: devpulse-nexus-backup
+    command: ["python", "-m", "app.backup"]
+    environment:
+      - BACKUP_INTERVAL_SECONDS=86400
+      - BACKUP_KEEP=14
+      - CHROMA_BACKUP_SOURCE=/data/chroma
+      - TELEMETRY_BACKUP_SOURCE=/data/telemetry
+      - BACKUP_DIRECTORY=/backups
     volumes:
-      - .:/source:ro
-      - backup_data:/backup
+      - chroma_data:/data/chroma:ro
+      - telemetry_data:/data/telemetry:ro
+      - backup_data:/backups
+    depends_on:
+      rag-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
 volumes:
   ollama_data:
+  chroma_data:
+  huggingface_cache:
+  telemetry_data:
   backup_data:

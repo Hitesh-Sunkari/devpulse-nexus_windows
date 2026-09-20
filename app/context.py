@@ -7,7 +7,7 @@ def build_context(question):
     try:
         rag_documents = retrieve_context(
             question,
-            number_of_results=4,
+            number_of_results=2,
         )
     except Exception:
         rag_documents = []

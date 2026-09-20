@@ -1,6 +1,6 @@
 from sentence_transformers import SentenceTransformer
 
-from chunking import load_document, chunk_text
+from app.chunking import load_document, chunk_text
 
 
 MODEL_NAME = "all-MiniLM-L6-v2"

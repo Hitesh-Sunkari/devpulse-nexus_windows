@@ -40,6 +40,14 @@ EXPLANATORY_PREDICATE = re.compile(
     flags=re.IGNORECASE,
 )
 
+# These verbs describe the form of a request, not its subject.  An answer to
+# “is Docker responsible for memory usage?” cannot qualify merely because it
+# repeats “Docker responsible”; it must also deal with “memory”.
+GENERIC_REQUEST_TERMS = {
+    "answer", "compare", "describe", "explain", "function", "purpose",
+    "question", "responsible", "usage", "working",
+}
+
 
 def _answer_content(answer):
     """Remove numbered question echoes before measuring an actual answer."""
@@ -129,6 +137,15 @@ def question_completion(question, answer, context):
         anchors = set(part.get("anchors") or [])
         matched_terms = sorted(term for term in terms if term in answer_terms)
         matched_anchors = sorted(anchor for anchor in anchors if anchor in answer_lower)
+        anchor_words = {
+            word
+            for anchor in anchors
+            for word in re.findall(r"[a-z]+", anchor)
+        }
+        subject_terms = terms - anchor_words - GENERIC_REQUEST_TERMS
+        matched_subject_terms = sorted(
+            term for term in subject_terms if term in answer_terms
+        )
         expected_signals = set().union(
             *(CONCEPT_EXPLANATION_SIGNALS.get(anchor, set()) for anchor in anchors)
         ) if anchors else set()
@@ -146,6 +163,11 @@ def question_completion(question, answer, context):
         addressed = bool(matched_anchors) if anchors else term_score >= 45
         if anchors and term_score < 25:
             addressed = False
+        # A concrete subject in the user's request (memory, network traffic,
+        # a repository name, etc.) must be mentioned.  This prevents a model
+        # answering a nearby but different Docker question from winning.
+        if subject_terms and not matched_subject_terms:
+            addressed = False
         if expected_signals and not matched_signals:
             addressed = False
         if anchors and not EXPLANATORY_PREDICATE.search(meaningful_answer):
@@ -157,6 +179,8 @@ def question_completion(question, answer, context):
             "addressed": addressed,
             "matched_terms": matched_terms,
             "matched_anchors": matched_anchors,
+            "subject_terms": sorted(subject_terms),
+            "matched_subject_terms": matched_subject_terms,
             "matched_signals": matched_signals,
         })
 

@@ -96,11 +96,10 @@ def _focused_query(question):
         # Prefer the implementation module over wrapper calls in main.py.
         terms = "file:app/digital_twin.py get_digital_twin"
     elif "docker" in lowered or "memory" in lowered:
-        # Retrieve the returned diagnostic evidence, not just the function
-        # docstring or its API wrapper. `build_diagnosis` is present in the
-        # indexed repository's stable implementation, whereas a particular
-        # response-field name can change as the schema evolves.
-        terms = "file:main.py build_diagnosis"
+        # Retrieve the actual decision rationale, not the `build_diagnosis`
+        # definition or API wrapper.  This phrase is stable in the diagnosis
+        # contract and places the displayed code window at useful evidence.
+        terms = 'file:main.py "not prove that Docker"'
     elif "rag" in lowered or "knowledge" in lowered:
         terms = "file:app/rag.py retrieve_evidence"
     elif "sourcegraph" in lowered:

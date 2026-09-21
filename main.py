@@ -715,10 +715,11 @@ def build_prompt(
     if mode == "thorough":
         profile = {
             "contract": (
-                "For each request provide: Direct answer, Evidence, and Caveat. "
-                "Use two to four sentences per request. Explain the mechanism "
-                "and uncertainty; cite relevant code as [path:line]. Do not repeat "
-                "the question. Maximum 240 words total."
+                "For each request write exactly three short sentences labelled "
+                "Direct answer:, Evidence:, and Caveat:. Each sentence must be "
+                "under 24 words. Explain the mechanism and uncertainty; cite "
+                "relevant code as [path:line]. Do not repeat the question, add "
+                "headings, introductions, or extra list items. Maximum 150 words total."
             ),
             "rag_count": 3,
             "rag_characters": 560,
@@ -729,10 +730,10 @@ def build_prompt(
         profile = {
             "contract": (
                 "For every request write exactly one complete numbered sentence. "
-                "Each sentence must directly answer its request, include only the "
-                "most important evidence, and end with a period. Do not repeat the "
-                "question, add headings, introductions, or extra list items. Maximum "
-                "two sentences per request."
+                "Each sentence must directly answer its request, contain no more than "
+                "28 words, include only the most important evidence, and end with a "
+                "period. Do not repeat the question, add headings, introductions, or "
+                "extra list items."
             ),
             "rag_count": 2,
             "rag_characters": 260,

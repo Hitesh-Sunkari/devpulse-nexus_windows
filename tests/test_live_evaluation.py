@@ -85,6 +85,27 @@ class LiveEvaluationTests(unittest.TestCase):
         self.assertFalse(result["completion"]["parts"][1]["addressed"])
         self.assertFalse(result["decision_eligible"])
 
+    def test_nearby_docker_topic_does_not_count_as_memory_answer(self):
+        result = evaluate_response(
+            "is docker responsible for memory usage",
+            "Explanation",
+            {
+                "answer": (
+                    "Docker can be responsible for network traffic because "
+                    "containers exchange data through its networking layer."
+                ),
+                "error": None,
+            },
+            {
+                **evidence_context(),
+                "question_parts": analyse_question(
+                    "is docker responsible for memory usage"
+                ),
+            },
+        )
+        self.assertFalse(result["decision_eligible"])
+        self.assertIn("memory", result["completion"]["parts"][0]["subject_terms"])
+
 
 if __name__ == "__main__":
     unittest.main()

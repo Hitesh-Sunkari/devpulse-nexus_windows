@@ -20,7 +20,7 @@ _QUERY_STOPWORDS = {
     "when", "which", "with", "would", "you", "your",
 }
 
-MIN_LEXICAL_OVERLAP = 1
+MIN_LEXICAL_OVERLAP = 2
 
 
 def _terms(value):
@@ -97,7 +97,11 @@ def _retrieve_cached(question, number_of_results):
         if not document:
             continue
         overlap = len(query_terms & _terms(document))
-        if query_terms and overlap < MIN_LEXICAL_OVERLAP:
+        # A single word such as “Docker” is not enough to call a document
+        # evidence for a question about Docker memory.  Short two-word concept
+        # queries still require both meaningful words where they exist.
+        minimum_overlap = min(MIN_LEXICAL_OVERLAP, len(query_terms))
+        if query_terms and overlap < minimum_overlap:
             continue
         metadata = metadatas[index] if index < len(metadatas) else {}
         distance = distances[index] if index < len(distances) else None

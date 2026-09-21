@@ -34,6 +34,7 @@ COMPARISON_CONTEXT_TOKENS = int(os.getenv("COMPARISON_NUM_CTX", "1536"))
 # Docker Desktop exposes twelve CPUs here. Reserve headroom for Sourcegraph,
 # FastAPI, and the host while avoiding Ollama's conservative one-thread path.
 OLLAMA_NUM_THREADS = int(os.getenv("OLLAMA_NUM_THREADS", "8"))
+COMPARISON_KEEP_ALIVE = os.getenv("OLLAMA_COMPARISON_KEEP_ALIVE", "5m")
 
 
 def comparison_token_budget(mode, question_parts=1):
@@ -96,10 +97,10 @@ def run_model(model, prompt, timeout=None, max_tokens=None):
         "model": model,
         "prompt": prompt,
         "stream": False,
-        # A comparison runs models sequentially. Unload after each response so
-        # Phi-3 is never competing with Qwen or TinyLlama for the WSL memory
-        # budget on a local Docker Desktop installation.
-        "keep_alive": "0",
+        # The models run sequentially, but retaining them briefly avoids a
+        # costly reload during the user's next comparison.  The three chosen
+        # models fit comfortably within the configured Docker/WSL budget.
+        "keep_alive": COMPARISON_KEEP_ALIVE,
         "options": {
             # Enough for a useful, structured answer without needlessly
             # extending CPU-only inference time for Phi-3 Mini.

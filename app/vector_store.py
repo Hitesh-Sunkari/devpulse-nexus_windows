@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import chromadb
 
@@ -19,29 +20,33 @@ def build_vector_store():
         name="devpulse_knowledge"
     )
 
-    file_path = "knowledge/docker.md"
+    knowledge_files = sorted(Path("knowledge").glob("*.md"))
+    if not knowledge_files:
+        raise RuntimeError("No Markdown knowledge files were found in knowledge/.")
 
-    text = load_document(file_path)
-    chunks = chunk_text(text)
+    chunks = []
+    metadatas = []
+    ids = []
+    for file_path in knowledge_files:
+        document_chunks = chunk_text(load_document(file_path))
+        for index, chunk in enumerate(document_chunks):
+            chunks.append(chunk)
+            ids.append(f"{file_path.stem}_chunk_{index}")
+            metadatas.append({"source": str(file_path).replace("\\", "/"), "chunk": index})
+
+    # This collection is owned by DevPulse. Rebuilding removes chunks from an
+    # older knowledge document that is no longer part of the curated corpus.
+    existing = collection.get(include=[]).get("ids", [])
+    if existing:
+        collection.delete(ids=existing)
 
     embeddings = create_embeddings(chunks)
-
-    ids = [
-        f"docker_chunk_{i}"
-        for i in range(len(chunks))
-    ]
 
     collection.upsert(
         ids=ids,
         documents=chunks,
         embeddings=embeddings.tolist(),
-        metadatas=[
-            {
-                "source": file_path,
-                "chunk": i
-            }
-            for i in range(len(chunks))
-        ]
+        metadatas=metadatas,
     )
 
     print("Vector database created successfully!")

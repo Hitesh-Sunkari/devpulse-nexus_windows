@@ -15,10 +15,9 @@ import psutil
 import requests
 
 from app.rag import retrieve_context
-from app.orchestrator import orchestrate_request
 from app.docker_monitor import get_docker_metrics
 from app.telemetry_history import record_telemetry, get_history
-from app.sourcegraph import search_sourcegraph, sourcegraph_status
+from app.sourcegraph import sourcegraph_status
 
 
 # ============================================================
@@ -60,7 +59,9 @@ OLLAMA_MODEL = os.getenv(
 )
 
 # Keep generation moderate because the model is running locally.
-OLLAMA_NUM_PREDICT = 160
+OLLAMA_NUM_PREDICT = int(os.getenv("ASK_NUM_PREDICT", "96"))
+OLLAMA_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
+OLLAMA_NUM_THREADS = int(os.getenv("OLLAMA_NUM_THREADS", "8"))
 
 # Number of RAG documents to retrieve.
 RAG_RESULTS = 2
@@ -455,7 +456,7 @@ def get_knowledge(question):
 # PROMPT BUILDER
 # ============================================================
 
-def build_prompt(
+def build_legacy_prompt(
     question,
     digital_twin,
     diagnosis,
@@ -669,6 +670,111 @@ facts from likely causes. Keep the answer concise, specific, and useful.
 
 
 # ============================================================
+# COMPACT COMPARISON PROMPT
+# ============================================================
+
+def build_prompt(
+    question,
+    digital_twin,
+    diagnosis,
+    documents,
+    sourcegraph_sources=None,
+    mode="fast",
+):
+    """Build mode-specific evidence packets for CPU-bound local models."""
+    from app.question_analysis import analyse_question
+
+    parts = analyse_question(question)
+    checklist = "\n".join(
+        f"{item['index']}. {item['question']}" for item in parts
+    )
+    runtime_requested = any(
+        anchor in {"docker", "ollama"}
+        for item in parts for anchor in item.get("anchors", [])
+    ) or any("memory" in item.get("terms", []) for item in parts)
+
+    if runtime_requested:
+        docker = digital_twin.get("docker", {})
+        containers = sorted(
+            docker.get("containers", []),
+            key=lambda item: parse_memory_usage_bytes(item.get("memory_usage")),
+            reverse=True,
+        )[:3]
+        telemetry = {
+            "host_memory_percent": digital_twin.get("system", {}).get("memory", {}).get("usage_percent"),
+            "docker_container_count": docker.get("container_count", 0),
+            "top_containers": [
+                {"name": item.get("name"), "memory": item.get("memory_usage")}
+                for item in containers
+            ],
+            "diagnosis": diagnosis.get("reason"),
+        }
+    else:
+        telemetry = {"note": "No runtime diagnosis is needed for this architecture question."}
+
+    if mode == "thorough":
+        profile = {
+            "contract": (
+                "For each request provide: Direct answer, Evidence, and Caveat. "
+                "Use two to four sentences per request. Explain the mechanism "
+                "and uncertainty; cite relevant code as [path:line]. Do not repeat "
+                "the question. Maximum 240 words total."
+            ),
+            "rag_count": 3,
+            "rag_characters": 560,
+            "code_count": 4,
+            "code_characters": 620,
+        }
+    else:
+        profile = {
+            "contract": (
+                "For every request write exactly one complete numbered sentence. "
+                "Each sentence must directly answer its request, include only the "
+                "most important evidence, and end with a period. Do not repeat the "
+                "question, add headings, introductions, or extra list items. Maximum "
+                "two sentences per request."
+            ),
+            "rag_count": 2,
+            "rag_characters": 260,
+            "code_count": 2,
+            "code_characters": 300,
+        }
+
+    rag = "\n".join(
+        f"- {item[:profile['rag_characters']]}"
+        for item in (documents or [])[:profile["rag_count"]]
+    ) or "- No relevant RAG evidence."
+    code = "\n".join(
+        f"- [{item.get('path')}:{int(item.get('line') or 0) + 1}] "
+        f"{(item.get('code') or item.get('preview') or '')[:profile['code_characters']]}"
+        for item in (sourcegraph_sources or [])[:profile["code_count"]]
+    ) or "- No relevant repository evidence."
+
+    return f"""You are DevPulse Nexus. Answer every numbered request.
+
+Mode: {mode.upper()}
+Answer contract: {profile['contract']}
+
+Rules: use supplied evidence only; never invent telemetry or code; do not
+claim Docker is the sole cause when diagnosis says it may contribute; cite code
+as [path:line] only when it supports the claim. If a fact is unavailable, say
+so rather than giving generic background information.
+
+REQUESTS:
+{checklist}
+
+LIVE FACTS:
+{json.dumps(telemetry, separators=(',', ':'))}
+
+RAG EVIDENCE:
+{rag}
+
+CODE EVIDENCE:
+{code}
+""".strip()
+
+
+# ============================================================
 # OLLAMA
 # ============================================================
 
@@ -693,8 +799,14 @@ def ask_ollama(prompt, model=None):
             "stream": False,
 
             "options": {
-                "num_predict": OLLAMA_NUM_PREDICT
+                "num_predict": OLLAMA_NUM_PREDICT,
+                "num_ctx": OLLAMA_NUM_CTX,
+                "num_thread": OLLAMA_NUM_THREADS,
+                "temperature": 0,
             },
+            # Keep the selected Ask Nexus model warm briefly for follow-up
+            # questions without keeping every comparison model in memory.
+            "keep_alive": "3m",
         },
 
         timeout=OLLAMA_TIMEOUT,
@@ -928,21 +1040,12 @@ def ask(question: str, model: str | None = None):
     )
 
     # --------------------------------------------------------
-    # 3. Orchestrate application services
+    # 3. Retrieve focused, attributable evidence per request part
     # --------------------------------------------------------
 
-    orchestration = orchestrate_request(
-        question=question,
-        digital_twin=digital_twin,
-        diagnosis=diagnosis,
-        rag_results=RAG_RESULTS,
-    )
-
-    documents = orchestration["retrieved_context"]
-    try:
-        repository_sources = search_sourcegraph(question, limit=8)
-    except Exception:
-        repository_sources = []
+    context = build_context(question)
+    documents = context.get("rag", [])
+    repository_sources = context.get("sourcegraph", [])
 
     # --------------------------------------------------------
     # 4. Build grounded prompt
@@ -1046,6 +1149,10 @@ def ask(question: str, model: str | None = None):
 
         "sources": documents,
 
+        "request_parts": context.get("question_parts", []),
+
+        "rag_evidence": context.get("rag_evidence", []),
+
         "sourcegraph": {
             "status": sourcegraph_status(),
             "results": repository_sources,
@@ -1073,6 +1180,7 @@ from app.context import (
 )
 from app.model_runner import (
     OLLAMA_MODELS,
+    comparison_token_budget,
     list_available_models,
     run_all_models,
 )
@@ -1085,6 +1193,7 @@ from app.comparison import (
 
 class CompareRequest(_Week5BaseModel):
     question: str
+    mode: str = "fast"
 
 
 _comparison_jobs = {}
@@ -1140,7 +1249,7 @@ def _job_error(job_id, message):
             })
 
 
-def _run_comparison_job(job_id, question):
+def _run_comparison_job(job_id, question, mode="fast"):
     """Run the real model evaluation and publish stage changes for the UI."""
     try:
         _job_update(job_id, "telemetry", "running", "Collecting Digital Twin telemetry.")
@@ -1155,7 +1264,7 @@ def _run_comparison_job(job_id, question):
             {"docker_available": twin.get("docker", {}).get("available", False)},
         )
 
-        _job_update(job_id, "retrieval", "running", "Retrieving RAG knowledge and Sourcegraph evidence.")
+        _job_update(job_id, "retrieval", "running", "Retrieving focused RAG and Sourcegraph evidence for each request part.")
         context = build_context(question)
         documents = context.get("rag", [])
         sources = context.get("sourcegraph", [])
@@ -1170,7 +1279,11 @@ def _run_comparison_job(job_id, question):
             "retrieval",
             "complete",
             "RAG retrieval and Sourcegraph search completed.",
-            {"rag_documents": len(documents), "sourcegraph_results": len(sources)},
+            {
+                "rag_documents": len(documents),
+                "sourcegraph_results": len(sources),
+                "question_parts": len(context.get("question_parts", [])),
+            },
         )
 
         selected_models = [
@@ -1186,13 +1299,19 @@ def _run_comparison_job(job_id, question):
             diagnosis=diagnosis,
             documents=documents,
             sourcegraph_sources=sources,
+            mode=mode,
+        )
+
+        max_tokens = comparison_token_budget(
+            mode,
+            len(context.get("question_parts", [])),
         )
 
         def on_progress(model, state, response):
             message = (
-                f"{model} is generating an evidence-grounded answer."
+                f"{model} is generating a {mode} evidence-grounded answer."
                 if state == "running"
-                else f"{model} completed."
+                else f"{model} completed in {response.get('latency_seconds', '—')}s."
             )
             _job_update(
                 job_id,
@@ -1202,8 +1321,18 @@ def _run_comparison_job(job_id, question):
                 {"model": model, "model_state": state},
             )
 
-        _job_update(job_id, "models", "running", "Running local models sequentially.")
-        responses = run_all_models(prompt, selected_models, on_progress)
+        _job_update(
+            job_id,
+            "models",
+            "running",
+            f"Running local models sequentially in {mode} mode ({max_tokens}-token answer limit).",
+        )
+        responses = run_all_models(
+            prompt,
+            selected_models,
+            on_progress,
+            max_tokens=max_tokens,
+        )
 
         _job_update(job_id, "evaluation", "running", "Scoring live answers against retrieved evidence.")
         category = classify_question(question)
@@ -1218,7 +1347,10 @@ def _run_comparison_job(job_id, question):
 
         _job_result(job_id, {
             "question": question,
+            "mode": mode,
             "category": category,
+            "question_parts": context.get("question_parts", []),
+            "retrieval_parts": context.get("retrieval_parts", []),
             "models": evaluated,
             "comparison": comparison,
             "telemetry": twin,
@@ -1229,6 +1361,7 @@ def _run_comparison_job(job_id, question):
             },
             "rag": {
                 "documents": documents,
+                "evidence": context.get("rag_evidence", []),
                 "count": len(documents),
             },
         })
@@ -1242,25 +1375,30 @@ def create_comparison_job(request: CompareRequest, background_tasks: BackgroundT
     if not question:
         raise HTTPException(status_code=400, detail="Question cannot be empty.")
 
+    mode = request.mode.strip().lower()
+    if mode not in {"fast", "thorough"}:
+        raise HTTPException(status_code=422, detail="mode must be 'fast' or 'thorough'.")
+
     job_id = uuid.uuid4().hex
     with _comparison_lock:
         _comparison_jobs[job_id] = {
             "id": job_id,
             "question": question,
+            "mode": mode,
             "state": "queued",
             "current_stage": "queued",
             "events": [{
                 "timestamp": now_iso(),
                 "stage": "queued",
                 "state": "queued",
-                "message": "Comparison queued.",
+                "message": f"{mode.title()} comparison queued.",
             }],
             "result": None,
             "error": None,
         }
 
-    background_tasks.add_task(_run_comparison_job, job_id, question)
-    return {"id": job_id, "state": "queued"}
+    background_tasks.add_task(_run_comparison_job, job_id, question, mode)
+    return {"id": job_id, "state": "queued", "mode": mode}
 
 
 @app.get("/comparison-jobs/{job_id}")
@@ -1286,22 +1424,41 @@ def compare(request: CompareRequest):
             "error": "Question cannot be empty."
         }
 
+    mode = request.mode.strip().lower()
+    if mode not in {"fast", "thorough"}:
+        raise HTTPException(status_code=422, detail="mode must be 'fast' or 'thorough'.")
+
     category = classify_question(question)
 
     context = build_context(question)
+    twin = get_digital_twin()
+    diagnosis = build_diagnosis(twin)
 
-    prompt = build_combined_prompt(
-        question,
-        context,
+    # Keep the synchronous API behaviour identical to background comparison
+    # jobs.  Both routes must use the selected mode's answer contract and the
+    # same compact, attributable evidence packet.
+    prompt = build_prompt(
+        question=question,
+        digital_twin=twin,
+        diagnosis=diagnosis,
+        documents=context.get("rag", []),
+        sourcegraph_sources=context.get("sourcegraph", []),
+        mode=mode,
     )
 
-    responses = run_all_models(prompt)
+    responses = run_all_models(
+        prompt,
+        max_tokens=comparison_token_budget(
+            mode,
+            len(context.get("question_parts", [])),
+        ),
+    )
 
     evaluated = evaluate_all(
         question,
         category,
         responses,
-        context,
+        {**context, "telemetry": twin, "diagnosis": diagnosis},
     )
 
     comparison = compare_models(
@@ -1311,6 +1468,8 @@ def compare(request: CompareRequest):
 
     return {
         "question": question,
+        "mode": mode,
+        "question_parts": context.get("question_parts", []),
         "category": category,
         "models": evaluated,
         "sourcegraph": {

@@ -24,6 +24,27 @@ OLLAMA_MODELS = [
     "tinyllama",
 ]
 
+# Fast comparison is the default for CPU-bound local models. It asks for a
+# concise, structured answer rather than allowing a small model to spend
+# minutes producing generic background material. Thorough mode remains useful
+# for deliberate deep dives.
+FAST_COMPARISON_TOKENS = int(os.getenv("COMPARISON_FAST_NUM_PREDICT", "56"))
+THOROUGH_COMPARISON_TOKENS = int(os.getenv("COMPARISON_THOROUGH_NUM_PREDICT", "192"))
+COMPARISON_CONTEXT_TOKENS = int(os.getenv("COMPARISON_NUM_CTX", "1536"))
+# Docker Desktop exposes twelve CPUs here. Reserve headroom for Sourcegraph,
+# FastAPI, and the host while avoiding Ollama's conservative one-thread path.
+OLLAMA_NUM_THREADS = int(os.getenv("OLLAMA_NUM_THREADS", "8"))
+
+
+def comparison_token_budget(mode, question_parts=1):
+    """Choose a response budget that is fast without cutting off compound answers."""
+    if mode == "thorough":
+        return THOROUGH_COMPARISON_TOKENS
+    # A single direct question remains very fast. Each explicit additional
+    # request receives a small allocation so a model can close its first
+    # section and actually explain the next one.
+    return min(112, max(FAST_COMPARISON_TOKENS, 44 * max(1, question_parts)))
+
 
 def _matches_requested_model(requested, installed):
     """Treat Ollama's implicit :latest tag as the requested base name."""
@@ -65,7 +86,7 @@ def list_available_models():
         return []
 
 
-def run_model(model, prompt, timeout=None):
+def run_model(model, prompt, timeout=None, max_tokens=None):
     start = time.perf_counter()
 
     if timeout is None:
@@ -82,7 +103,9 @@ def run_model(model, prompt, timeout=None):
         "options": {
             # Enough for a useful, structured answer without needlessly
             # extending CPU-only inference time for Phi-3 Mini.
-            "num_predict": 128,
+            "num_predict": max_tokens or FAST_COMPARISON_TOKENS,
+            "num_ctx": COMPARISON_CONTEXT_TOKENS,
+            "num_thread": OLLAMA_NUM_THREADS,
             "temperature": 0,
         },
     }).encode()
@@ -131,7 +154,7 @@ def run_model(model, prompt, timeout=None):
         }
 
 
-def run_all_models(prompt, models=None, on_progress=None):
+def run_all_models(prompt, models=None, on_progress=None, max_tokens=None):
     results = {}
 
     models = models or OLLAMA_MODELS
@@ -139,7 +162,7 @@ def run_all_models(prompt, models=None, on_progress=None):
     for model in models:
         if on_progress:
             on_progress(model, "running", None)
-        results[model] = run_model(model, prompt)
+        results[model] = run_model(model, prompt, max_tokens=max_tokens)
         if on_progress:
             on_progress(model, "complete", results[model])
 

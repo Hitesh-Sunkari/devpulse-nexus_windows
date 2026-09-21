@@ -121,7 +121,7 @@ def load_historical():
 
 
 def compare_models(evaluated, category):
-    valid = {
+    completed = {
         model: info
         for model, info in evaluated.items()
         if info.get("error") is None
@@ -129,11 +129,29 @@ def compare_models(evaluated, category):
         and info.get("score") is not None
     }
 
-    if not valid:
+    if not completed:
         return {
             "best_model": None,
             "reason": "No model completed successfully.",
             "category": category,
+            "confidence": "none",
+        }
+
+    valid = {
+        model: info for model, info in completed.items()
+        if info.get("decision_eligible")
+    }
+
+    if not valid:
+        return {
+            "best_model": None,
+            "reason": (
+                "No reliable winner: every completed answer missed at least "
+                "one explicit part of the request."
+            ),
+            "category": category,
+            "confidence": "low",
+            "scores": {model: info["score"] for model, info in completed.items()},
         }
 
     ordered = sorted(
@@ -147,11 +165,12 @@ def compare_models(evaluated, category):
     return {
         "best_model": best_model,
         "reason": (
-            f"Highest live evaluation score for "
-            f"the {category} question: "
+            f"Highest eligible evidence-alignment score for "
+            f"the {category} request: "
             f"{best['score']:.1f}/100."
         ),
         "category": category,
+        "confidence": "evidence-aligned",
         "scores": {
             model: info["score"]
             for model, info in valid.items()

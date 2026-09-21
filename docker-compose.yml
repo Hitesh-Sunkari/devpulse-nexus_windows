@@ -11,10 +11,15 @@ services:
       # Sourcegraph is deployed separately using its supported deployment
       # stack, and is reachable from Docker Desktop through this host alias.
       - SOURCEGRAPH_URL=${SOURCEGRAPH_URL:-http://host.docker.internal}
+      - SOURCEGRAPH_PUBLIC_URL=${SOURCEGRAPH_PUBLIC_URL:-http://localhost}
       - SOURCEGRAPH_REPOSITORY=${SOURCEGRAPH_REPOSITORY:-github.com/Hitesh-Sunkari/devpulse-nexus_windows}
       - OLLAMA_URL=http://ollama:11434
       - OLLAMA_MODEL=qwen2.5:1.5b
       - OLLAMA_TIMEOUT=300
+      - OLLAMA_NUM_THREADS=${OLLAMA_NUM_THREADS:-8}
+      - COMPARISON_FAST_NUM_PREDICT=${COMPARISON_FAST_NUM_PREDICT:-56}
+      - COMPARISON_THOROUGH_NUM_PREDICT=${COMPARISON_THOROUGH_NUM_PREDICT:-192}
+      - COMPARISON_NUM_CTX=${COMPARISON_NUM_CTX:-1536}
       - DOCKER_HOST=unix:///var/run/docker.sock
       - TELEMETRY_HISTORY_PATH=/app/runtime/telemetry_history.json
       - OPENBLAS_NUM_THREADS=1

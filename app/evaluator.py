@@ -1,13 +1,15 @@
-"""Deterministic, evidence-aware scoring for live model comparisons.
+"""Deterministic, evidence-aware evaluation for live model comparisons.
 
-For benchmark questions the metrics use matching reference concepts. For live
-questions they measure the actual answer against the telemetry, RAG documents,
-and Sourcegraph results collected in that exact comparison job.
+These are transparent evidence-alignment indicators, not a claim of semantic
+ground truth.  They deliberately reject an otherwise fluent answer that omits
+an explicit part of the user's request.
 """
 
 import json
 import re
 from pathlib import Path
+
+from app.question_analysis import analyse_question, important_terms
 
 
 REFERENCE_PATH = Path("evaluation/reference_answers.json")
@@ -17,10 +19,42 @@ STOPWORDS = {
     "which", "for", "with", "from", "that", "this", "it", "be", "can",
     "should", "as", "by", "into", "about", "function", "purpose",
 }
-CATEGORIES = [
-    "Correctness", "Relevance", "Grounding", "Coverage", "Completeness",
-    "Clarity", "Hallucination",
-]
+
+# Merely repeating the named component in a question is not an explanation.
+# These signals represent the minimum factual content needed for the recurring
+# DevPulse concepts to count as addressed.
+CONCEPT_EXPLANATION_SIGNALS = {
+    "digital twin": {"telemetry", "snapshot", "environment", "host", "container", "docker", "combine", "collect"},
+    "docker": {"container", "telemetry", "diagnosis", "contribut", "sole", "budget", "host", "memory"},
+    "sourcegraph": {"repository", "search", "evidence", "code"},
+    "rag": {"retrieve", "knowledge", "chunk", "context", "chromadb"},
+    "ollama": {"model", "generate", "inference", "local"},
+}
+DANGLING_ENDINGS = {
+    "a", "an", "and", "are", "as", "at", "by", "for", "from", "in",
+    "is", "of", "or", "that", "the", "to", "what", "with",
+}
+EXPLANATORY_PREDICATE = re.compile(
+    r"\b(?:is|are|can|may|does|combines?|collects?|creates?|returns?|"
+    r"provides?|uses?|produces?|builds?|captures?|represents?|contributes?)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _answer_content(answer):
+    """Remove numbered question echoes before measuring an actual answer."""
+    useful = []
+    question_heading = re.compile(
+        r"^\s*(?:#{1,6}\s*)?(?:\d+[.)]\s*)?"
+        r"(?:what|how|why|where|which|who|is|are|does|do|can|could)\b",
+        flags=re.IGNORECASE,
+    )
+    for line in (answer or "").splitlines():
+        cleaned = line.strip()
+        if not cleaned or question_heading.match(cleaned):
+            continue
+        useful.append(cleaned)
+    return "\n".join(useful)
 
 
 def tokens(text):
@@ -36,8 +70,7 @@ def load_references():
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
-            return next((data[key] for key in ("questions", "references", "data")
-                         if isinstance(data.get(key), list)), [])
+            return next((data[key] for key in ("questions", "references", "data") if isinstance(data.get(key), list)), [])
     except (OSError, json.JSONDecodeError):
         pass
     return []
@@ -45,8 +78,7 @@ def load_references():
 
 def find_reference(question):
     normalized = question.strip().lower()
-    return next((item for item in load_references()
-                 if str(item.get("question", "")).strip().lower() == normalized), None)
+    return next((item for item in load_references() if str(item.get("question", "")).strip().lower() == normalized), None)
 
 
 def concept_list(reference):
@@ -65,19 +97,18 @@ def concept_coverage(answer, reference):
     if not concepts:
         reference_tokens = tokens(reference.get("reference_answer", ""))
         return round(100 * len(reference_tokens & answer_tokens) / len(reference_tokens), 1) if reference_tokens else None
-    matched = sum(
-        concept.lower() in answer_lower
-        or bool(tokens(concept) and tokens(concept).issubset(answer_tokens))
-        for concept in concepts
-    )
+    matched = sum(concept.lower() in answer_lower or bool(tokens(concept) and tokens(concept).issubset(answer_tokens)) for concept in concepts)
     return round(100 * matched / len(concepts), 1)
 
 
 def _context_text(context):
     values = []
     values.extend(str(item) for item in context.get("rag", []))
-    values.extend(str(source.get(field, "")) for source in context.get("sourcegraph", [])
-                  for field in ("repository", "path", "preview", "code"))
+    values.extend(
+        str(source.get(field, ""))
+        for source in context.get("sourcegraph", [])
+        for field in ("repository", "path", "preview", "code")
+    )
     if context.get("telemetry"):
         values.append(json.dumps(context["telemetry"], sort_keys=True))
     if context.get("diagnosis"):
@@ -85,31 +116,116 @@ def _context_text(context):
     return "\n".join(values)
 
 
-def relevance(question, answer):
-    question_tokens, answer_tokens = tokens(question), tokens(answer)
-    if not question_tokens or not answer_tokens:
-        return 0.0
-    return round(100 * len(question_tokens & answer_tokens) / len(question_tokens), 1)
+def question_completion(question, answer, context):
+    """Measure whether each explicit user request is materially addressed."""
+    meaningful_answer = _answer_content(answer)
+    answer_lower = meaningful_answer.lower()
+    answer_terms = tokens(meaningful_answer)
+    parts = context.get("question_parts") or analyse_question(question)
+    details = []
+
+    for part in parts:
+        terms = set(part.get("terms") or important_terms(part.get("question", "")))
+        anchors = set(part.get("anchors") or [])
+        matched_terms = sorted(term for term in terms if term in answer_terms)
+        matched_anchors = sorted(anchor for anchor in anchors if anchor in answer_lower)
+        expected_signals = set().union(
+            *(CONCEPT_EXPLANATION_SIGNALS.get(anchor, set()) for anchor in anchors)
+        ) if anchors else set()
+        matched_signals = sorted(
+            signal for signal in expected_signals
+            if signal in answer_lower
+        )
+        term_score = 100 * len(matched_terms) / len(terms) if terms else 100.0
+        anchor_score = 100 * len(matched_anchors) / len(anchors) if anchors else 100.0
+        signal_score = 100 * len(matched_signals) / len(expected_signals) if expected_signals else 100.0
+        score = round(term_score * 0.45 + anchor_score * 0.35 + signal_score * 0.20, 1)
+        # A named DevPulse concept must be explicitly named, while ordinary
+        # questions also need enough distinctive terms to avoid keyword-only
+        # answers being marked complete.
+        addressed = bool(matched_anchors) if anchors else term_score >= 45
+        if anchors and term_score < 25:
+            addressed = False
+        if expected_signals and not matched_signals:
+            addressed = False
+        if anchors and not EXPLANATORY_PREDICATE.search(meaningful_answer):
+            addressed = False
+        details.append({
+            "index": part.get("index"),
+            "question": part.get("question"),
+            "score": score,
+            "addressed": addressed,
+            "matched_terms": matched_terms,
+            "matched_anchors": matched_anchors,
+            "matched_signals": matched_signals,
+        })
+
+    coverage = round(sum(item["score"] for item in details) / len(details), 1) if details else 0.0
+    final_word = re.findall(r"[A-Za-z]+", meaningful_answer.lower())
+    appears_truncated = bool(final_word and final_word[-1] in DANGLING_ENDINGS)
+    return {
+        "coverage": coverage,
+        "is_complete": bool(details) and all(item["addressed"] for item in details) and not appears_truncated,
+        "appears_truncated": appears_truncated,
+        "parts": details,
+    }
+
+
+def _citation_score(answer, context):
+    known_paths = {str(item.get("path")) for item in context.get("sourcegraph", []) if item.get("path")}
+    cited_paths = set(re.findall(r"\[([^\]\n]+?\.py):\d+\]", answer or ""))
+    if not known_paths:
+        return 100.0, []
+    if not cited_paths:
+        return 15.0, []
+    supported = [path for path in cited_paths if path in known_paths]
+    return round(100 * len(supported) / len(cited_paths), 1), sorted(cited_paths - set(supported))
+
+
+def _numeric_claim_score(answer, context):
+    evidence = re.sub(r"\s+", "", _context_text(context).lower())
+    claims = re.findall(r"\b\d+(?:\.\d+)?\s*(?:%|gib|mib|gb|mb|cores?)\b", answer or "", flags=re.IGNORECASE)
+    if not claims:
+        return 100.0, []
+    unsupported = [claim for claim in claims if re.sub(r"\s+", "", claim.lower()) not in evidence]
+    return round(100 * (1 - len(unsupported) / len(claims)), 1), unsupported
+
+
+def _contradictions(answer, context):
+    answer_lower = (answer or "").lower()
+    diagnosis = context.get("diagnosis") or {}
+    assessment = diagnosis.get("assessment")
+    problems = []
+    if assessment == "potentially_significant" and re.search(r"docker (?:is )?(?:not responsible|cannot be responsible|isn't responsible)", answer_lower):
+        problems.append("contradicts the deterministic Docker contribution assessment")
+    if assessment in {"unlikely", "not_responsible"} and re.search(r"docker (?:is )?(?:the |sole )?(?:cause|responsible)", answer_lower):
+        problems.append("overstates Docker responsibility against the deterministic assessment")
+    return problems
 
 
 def grounding(answer, context):
     answer_tokens, evidence_tokens = tokens(answer), tokens(_context_text(context))
     if not answer_tokens or not evidence_tokens:
         return None
-    supported = len(answer_tokens & evidence_tokens)
-    claim_tokens = max(1, min(len(answer_tokens), len(evidence_tokens)))
-    return round(min(100.0, 100 * supported / claim_tokens), 1)
+    overlap = 100 * len(answer_tokens & evidence_tokens) / len(answer_tokens)
+    citation_score, _ = _citation_score(answer, context)
+    numeric_score, _ = _numeric_claim_score(answer, context)
+    return round(overlap * 0.55 + citation_score * 0.30 + numeric_score * 0.15, 1)
 
 
-def hallucination_safety(answer, context):
-    known_paths = {str(item.get("path")) for item in context.get("sourcegraph", []) if item.get("path")}
-    referenced_paths = set(re.findall(r"(?:[\w.-]+/)*[\w.-]+\.py", answer or ""))
-    if not referenced_paths:
-        return 100.0
-    if not known_paths:
-        return None
-    unsupported = [path for path in referenced_paths if path not in known_paths]
-    return round(100 * (1 - len(unsupported) / len(referenced_paths)), 1)
+def evidence_safety(answer, context):
+    citation_score, unsupported_paths = _citation_score(answer, context)
+    numeric_score, unsupported_numbers = _numeric_claim_score(answer, context)
+    contradictions = _contradictions(answer, context)
+    penalty = len(unsupported_paths) * 25 + len(unsupported_numbers) * 12 + len(contradictions) * 35
+    # Citation and numeric support are evidence signals. Contradictions and
+    # invented paths/numbers are explicit safety failures.
+    score = max(0.0, min(100.0, (citation_score * 0.45 + numeric_score * 0.55) - penalty))
+    return round(score, 1), {
+        "unsupported_paths": unsupported_paths,
+        "unsupported_numbers": unsupported_numbers,
+        "contradictions": contradictions,
+    }
 
 
 def clarity(answer):
@@ -119,62 +235,88 @@ def clarity(answer):
     count = len(words)
     lines = [line.strip().lower() for line in (answer or "").splitlines() if line.strip()]
     repetition = len(lines) - len(set(lines))
-    score = 100.0 if 20 <= count <= 220 else 75.0 if 8 <= count <= 320 else 45.0
-    return round(max(0.0, score - repetition * 12), 1)
+    score = 100.0 if 18 <= count <= 135 else 75.0 if 8 <= count <= 180 else 45.0
+    return round(max(0.0, score - repetition * 15), 1)
 
 
 def category_scores(question, answer, context, reference=None):
-    rel = relevance(question, answer)
+    completion = question_completion(question, answer, context)
     ground = grounding(answer, context)
-    safety = hallucination_safety(answer, context)
+    safety, safety_details = evidence_safety(answer, context)
+    coverage = completion["coverage"]
+    relevance = coverage
     if reference:
-        coverage = concept_coverage(answer, reference)
-        correctness = coverage
+        reference_score = concept_coverage(answer, reference)
+        correctness = round(reference_score * 0.70 + (ground or 0) * 0.20 + safety * 0.10, 1)
     else:
-        # Live correctness is evidence alignment, not fabricated ground truth.
-        coverage = rel
-        correctness = round((rel + ground) / 2, 1) if ground is not None else rel
-    evidence_factor = ground if ground is not None else rel
+        correctness = round(coverage * 0.45 + (ground or 0) * 0.45 + safety * 0.10, 1)
+    if not completion["is_complete"]:
+        correctness = min(correctness, 45.0)
     clarity_score = clarity(answer)
-    completeness = round((coverage + evidence_factor + clarity_score) / 3, 1)
+    completeness = round(coverage * 0.75 + (ground or 0) * 0.15 + clarity_score * 0.10, 1)
     return {
         "Correctness": correctness,
-        "Relevance": rel,
+        "Relevance": relevance,
         "Grounding": ground,
         "Coverage": coverage,
         "Completeness": completeness,
         "Clarity": clarity_score,
-        "Hallucination": safety,
+        "Evidence safety": safety,
+    }, completion, safety_details
+
+
+def overall_score(scores, completion):
+    weights = {
+        "Correctness": 0.25,
+        "Relevance": 0.15,
+        "Grounding": 0.20,
+        "Coverage": 0.20,
+        "Completeness": 0.10,
+        "Clarity": 0.05,
+        "Evidence safety": 0.05,
     }
-
-
-def overall_score(scores):
-    measured = [value for value in scores.values() if value is not None]
-    return round(sum(measured) / len(measured), 1) if measured else None
+    measured_weight = sum(weights[name] for name, value in scores.items() if value is not None)
+    if not measured_weight:
+        return None
+    score = sum(weights[name] * value for name, value in scores.items() if value is not None) / measured_weight
+    # Missing a user-requested part makes an answer ineligible to win and
+    # visibly caps its headline score rather than hiding the failure.
+    if not completion["is_complete"]:
+        score = min(score, 59.0)
+    return round(score, 1)
 
 
 def evaluate_response(question, category, response, context):
     answer = response.get("answer", "")
     reference = find_reference(question)
-    scores = category_scores(question, answer, context, reference)
+    scores, completion, safety_details = category_scores(question, answer, context, reference)
+    warnings = []
+    missed = [part["question"] for part in completion["parts"] if not part["addressed"]]
+    if missed:
+        warnings.append("Did not address: " + "; ".join(missed))
+    if completion["appears_truncated"]:
+        warnings.append("Answer appears to end mid-sentence")
+    if safety_details["contradictions"]:
+        warnings.extend(safety_details["contradictions"])
+    if safety_details["unsupported_numbers"]:
+        warnings.append("Contains unsupported numeric claim(s): " + ", ".join(safety_details["unsupported_numbers"]))
     result = dict(response)
     result.update({
         "category": category,
         "categories": scores,
         "relevance": scores["Relevance"],
         "grounding": scores["Grounding"],
-        "hallucination": None if scores["Hallucination"] is None else round(100 - scores["Hallucination"], 1),
+        "hallucination": round(100 - scores["Evidence safety"], 1),
         "coverage": scores["Coverage"],
         "correctness": scores["Correctness"],
-        "score": overall_score(scores),
-        "evaluation_basis": (
-            "Reference-concept evaluation" if reference else
-            "Live evidence alignment across telemetry, RAG, and repository context"
-        ),
+        "score": overall_score(scores, completion),
+        "completion": completion,
+        "decision_eligible": completion["is_complete"] and not response.get("error"),
+        "evaluation_warnings": warnings,
+        "evaluation_basis": "Reference-concept evaluation" if reference else "Deterministic completion and evidence-alignment indicators",
     })
     return result
 
 
 def evaluate_all(question, category, responses, context):
-    return {model: evaluate_response(question, category, response, context)
-            for model, response in responses.items()}
+    return {model: evaluate_response(question, category, response, context) for model, response in responses.items()}

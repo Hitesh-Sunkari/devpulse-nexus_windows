@@ -87,11 +87,30 @@ def list_available_models():
         return []
 
 
-def run_model(model, prompt, timeout=None, max_tokens=None):
+def run_model(
+    model,
+    prompt,
+    timeout=None,
+    max_tokens=None,
+    mode="fast",
+    question_parts=1,
+):
     start = time.perf_counter()
 
     if timeout is None:
         timeout = int(os.getenv("OLLAMA_TIMEOUT", "300"))
+
+    requested_tokens = max_tokens or FAST_COMPARISON_TOKENS
+    options = {
+        "num_predict": requested_tokens,
+        "num_ctx": COMPARISON_CONTEXT_TOKENS,
+        "num_thread": OLLAMA_NUM_THREADS,
+        "temperature": 0,
+    }
+    # One-part Fast responses must stop before a small model starts an
+    # unnecessary second numbered item or echoes a prompt section.
+    if mode == "fast" and question_parts == 1:
+        options["stop"] = ["\n2.", "\n3.", "\n\n", "\n#"]
 
     payload = json.dumps({
         "model": model,
@@ -101,14 +120,7 @@ def run_model(model, prompt, timeout=None, max_tokens=None):
         # costly reload during the user's next comparison.  The three chosen
         # models fit comfortably within the configured Docker/WSL budget.
         "keep_alive": COMPARISON_KEEP_ALIVE,
-        "options": {
-            # Enough for a useful, structured answer without needlessly
-            # extending CPU-only inference time for Phi-3 Mini.
-            "num_predict": max_tokens or FAST_COMPARISON_TOKENS,
-            "num_ctx": COMPARISON_CONTEXT_TOKENS,
-            "num_thread": OLLAMA_NUM_THREADS,
-            "temperature": 0,
-        },
+        "options": options,
     }).encode()
 
     request = urllib.request.Request(
@@ -137,6 +149,14 @@ def run_model(model, prompt, timeout=None, max_tokens=None):
             "load_duration_ns": data.get("load_duration"),
             "eval_duration_ns": data.get("eval_duration"),
             "response_tokens": data.get("eval_count"),
+            "done_reason": data.get("done_reason"),
+            # Ollama marks length-limited output explicitly on supported
+            # versions.  The token-count fallback protects older versions.
+            "truncated": (
+                data.get("done_reason") in {"length", "max_tokens"}
+                or int(data.get("eval_count") or 0) >= requested_tokens
+            ),
+            "mode": mode,
             "error": None,
         }
 
@@ -151,11 +171,21 @@ def run_model(model, prompt, timeout=None, max_tokens=None):
             "load_duration_ns": None,
             "eval_duration_ns": None,
             "response_tokens": None,
+            "done_reason": None,
+            "truncated": False,
+            "mode": mode,
             "error": str(exc),
         }
 
 
-def run_all_models(prompt, models=None, on_progress=None, max_tokens=None):
+def run_all_models(
+    prompt,
+    models=None,
+    on_progress=None,
+    max_tokens=None,
+    mode="fast",
+    question_parts=1,
+):
     results = {}
 
     models = models or OLLAMA_MODELS
@@ -163,7 +193,13 @@ def run_all_models(prompt, models=None, on_progress=None, max_tokens=None):
     for model in models:
         if on_progress:
             on_progress(model, "running", None)
-        results[model] = run_model(model, prompt, max_tokens=max_tokens)
+        results[model] = run_model(
+            model,
+            prompt,
+            max_tokens=max_tokens,
+            mode=mode,
+            question_parts=question_parts,
+        )
         if on_progress:
             on_progress(model, "complete", results[model])
 

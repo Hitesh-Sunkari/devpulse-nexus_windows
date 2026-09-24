@@ -106,6 +106,55 @@ class LiveEvaluationTests(unittest.TestCase):
         self.assertFalse(result["decision_eligible"])
         self.assertIn("memory", result["completion"]["parts"][0]["subject_terms"])
 
+    def test_length_limited_fast_answer_is_not_eligible(self):
+        result = evaluate_response(
+            "is docker responsible for memory usage",
+            "Explanation",
+            {
+                "answer": "Docker may contribute to memory pressure, but",
+                "truncated": True,
+                "mode": "fast",
+                "error": None,
+            },
+            {
+                **evidence_context(),
+                "question_parts": analyse_question(
+                    "is docker responsible for memory usage"
+                ),
+            },
+        )
+        self.assertFalse(result["decision_eligible"])
+        self.assertIn(
+            "Model reached its response limit before producing a complete answer.",
+            result["evaluation_warnings"],
+        )
+
+    def test_diagnosis_contradiction_is_not_eligible(self):
+        result = evaluate_response(
+            "is docker responsible for memory usage",
+            "Explanation",
+            {
+                "answer": (
+                    "Docker is not responsible for memory usage because "
+                    "containers share the host kernel."
+                ),
+                "mode": "fast",
+                "error": None,
+            },
+            {
+                **evidence_context(),
+                "question_parts": analyse_question(
+                    "is docker responsible for memory usage"
+                ),
+            },
+        )
+        self.assertFalse(result["decision_eligible"])
+        self.assertLessEqual(result["score"], 59.0)
+        self.assertIn(
+            "contradicts the deterministic Docker contribution assessment",
+            result["evaluation_warnings"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -73,7 +73,7 @@
     .score-row { display:grid; grid-template-columns:94px 1fr 37px; gap:6px; align-items:center; font-size:10px; margin:6px 0; }.score-row .track { height:7px; background:var(--surface2); border-radius:99px; overflow:hidden; }.score-row .track span { height:100%; display:block; border-radius:inherit; background:linear-gradient(90deg,var(--blue),var(--purple)); }.score-row em { font-style:normal; text-align:right; color:var(--muted); }
     .model-answer { margin-top:14px; padding-top:12px; border-top:1px solid var(--border); font-size:12px; color:var(--text); white-space:pre-wrap; max-height:230px; overflow:auto; }.model-meta{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}.model-meta span,.coverage-chip{font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:3px 7px}.coverage-chip.good{color:var(--green);border-color:color-mix(in srgb,var(--green) 55%,var(--border))}.coverage-chip.missed{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 55%,var(--border))}.evaluation-warning{margin-top:9px;color:var(--amber);font-size:11px}.decision-note{margin-top:7px;font-size:11px;color:var(--muted)}
     .evidence { margin-top:16px; display:none; }.evidence.show { display:block; }.evidence-item { padding:11px; border-radius:9px; background:var(--surface2); border:1px solid var(--border); margin-top:7px; }.evidence-item code { color:var(--blue); font-size:11px; }.evidence-item p { margin:5px 0 0; color:var(--muted); font-size:12px; white-space:pre-wrap; }.evidence-item a{color:var(--blue);text-decoration:none}.evidence-item a:hover{text-decoration:underline}.evidence-item small{display:block;color:var(--muted);margin-top:5px;font-size:10px}
-    .footer { color:var(--muted); font-size:12px; text-align:center; padding:22px; }
+    .benchmark-controls{display:flex;align-items:center;gap:9px;flex-wrap:wrap}.benchmark-controls select{border:1px solid var(--border);border-radius:9px;background:var(--surface2);color:var(--text);padding:8px;font-size:12px}.benchmark-status{color:var(--muted);font-size:12px;margin:0 0 12px}.table-scroll{overflow:auto;border:1px solid var(--border);border-radius:10px}.benchmark-table{border-collapse:collapse;width:100%;min-width:900px;font-size:11px}.benchmark-table th,.benchmark-table td{padding:10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}.benchmark-table th{color:var(--muted);font-weight:750;text-transform:uppercase;letter-spacing:.04em;background:var(--surface2)}.benchmark-table td strong{color:var(--green)}.guardrail-list{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-top:14px}.guardrail-item{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:11px;font-size:11px}.guardrail-item strong{display:block;color:var(--green);margin-bottom:3px}.footer { color:var(--muted); font-size:12px; text-align:center; padding:22px; }
     @media (max-width:1050px) { .nav { display:none; }.metric-grid { grid-template-columns:repeat(2,1fr); }.comparison-grid { grid-template-columns:1fr; }.flow,.stage-list { grid-template-columns:repeat(3,1fr); }.container { grid-template-columns:1fr repeat(3,.8fr); }.container div:nth-last-child(-n+2) { display:none; } }
     @media (max-width:650px) { .shell { width:min(100% - 26px,1440px); }.topbar .shell { min-height:62px; }.brand { min-width:auto; }.brand small,.actions .live { display:none; }.hero { display:block; }.timestamp { text-align:left; margin-top:8px; }.metric-grid,.grid,.details,.flow,.stage-list { grid-template-columns:1fr; }.form-row,.comparison-input { grid-template-columns:1fr; }.form-row select { width:auto; }.compare-actions{flex-direction:row}.compare-actions .button{flex:1}.container { grid-template-columns:1fr 1fr; }.container div:nth-last-child(-n+2) { display:block; }.container div:nth-child(4),.container div:nth-child(5) { display:none; }.page { padding-top:22px; }.hero h1 { font-size:27px; } }
     .container-scroll{max-height:460px;overflow:auto;padding-right:4px;scrollbar-color:var(--border) transparent;scrollbar-width:thin}.container-scroll:focus{outline:2px solid color-mix(in srgb,var(--blue) 55%,transparent);outline-offset:4px;border-radius:10px}@media(max-width:650px){.container-scroll{max-height:360px}}
@@ -82,7 +82,7 @@
 <body>
   <header class="topbar"><div class="shell">
     <a class="brand" href="#overview" style="color:inherit;text-decoration:none"><div class="brand-mark">DP</div><div><strong>DevPulse Nexus</strong><small>Developer environment intelligence</small></div></a>
-    <nav class="nav"><a href="#overview">Overview</a><a href="#pipeline">Pipeline</a><a href="#ask-nexus">Ask Nexus</a><a href="#comparison">Model comparison</a></nav>
+    <nav class="nav"><a href="#overview">Overview</a><a href="#pipeline">Pipeline</a><a href="#ask-nexus">Ask Nexus</a><a href="#comparison">Model comparison</a><a href="#benchmark">Benchmark</a></nav>
     <div class="actions"><div class="live"><span id="connectionDot" class="dot"></span><span id="connectionText">Live telemetry</span></div><button id="themeButton" class="button" type="button">Theme</button><button id="refreshButton" class="button" type="button">Refresh</button></div>
   </div></header>
   <main id="overview" class="shell page">
@@ -101,6 +101,8 @@
     <section class="card panel"><div class="panel-head"><div><h2>Docker telemetry</h2><p id="dockerDescription">Live container resource data from the Docker Engine socket. Memory % is relative to each container's limit.</p></div><span id="dockerBadge" class="badge">LOADING</span></div><div class="container-scroll" tabindex="0" aria-label="Scrollable Docker container telemetry"><div id="containerList" class="container-list"><div class="empty">Loading containers…</div></div></div></section>
     <section id="ask-nexus" class="card panel"><div class="panel-head"><div><h2>Ask Nexus</h2><p>Choose any locally installed model. The answer receives current telemetry, RAG knowledge, and available Sourcegraph evidence.</p></div><span id="askBadge" class="badge">LOCAL AI</span></div><form id="askForm" class="form-row"><select id="modelSelect" aria-label="Choose local model"><option>Loading models…</option></select><input id="questionInput" required autocomplete="off" placeholder="Ask about the live environment, a container, or the repository"><button id="askButton" class="button primary" type="submit">Ask Nexus</button></form><div id="askResult" class="ask-result"><div id="askAnswer" class="answer"></div><div id="askMeta" class="answer-meta"></div></div></section>
     <section id="comparison" class="card panel"><div class="panel-head"><div><h2>Live model comparison</h2><p>Every model receives the same focused telemetry, RAG, and Sourcegraph evidence. Fast gives complete direct answers; Thorough explains evidence and caveats.</p></div><span id="compareBadge" class="badge">READY</span></div><div class="comparison-input"><textarea id="compareQuestion" placeholder="Ask a repository or environment question to compare all local models…"></textarea><div class="compare-actions"><select id="comparisonMode" aria-label="Comparison response depth"><option value="fast" selected>Fast · direct answers</option><option value="thorough">Thorough · evidence + caveats</option></select><button id="compareButton" class="button primary" type="button">Run comparison</button></div></div><p id="comparisonModeHint" class="mode-hint">Fast: one complete direct sentence per request for the quickest reliable comparison.</p><div class="stage-list" aria-live="polite"><div id="stageTelemetry" class="stage">Telemetry</div><div id="stageRetrieval" class="stage">RAG + Sourcegraph</div><div id="stageModels" class="stage">Models</div><div id="stageEvaluation" class="stage">Scoring</div><div id="stageComplete" class="stage">Decision</div></div><div id="eventLog" class="event-log">Ready for a live evaluation.</div><div id="comparisonSummary" class="comparison-summary"></div><div id="comparisonGrid" class="comparison-grid"></div><div id="evidence" class="evidence"><div class="panel-head"><div><h2>Sourcegraph evidence</h2><p id="evidenceStatus"></p></div></div><div id="evidenceList"></div></div></section>
+    <section id="benchmark" class="card panel"><div class="panel-head"><div><h2>Category-wise model benchmark</h2><p>Each selected model receives the identical Week 4 questions in a category. Winners are independent per task type; this view never reports a single overall model winner.</p></div><span id="benchmarkBadge" class="badge">LOADING</span></div><div class="benchmark-controls"><select id="benchmarkCategory" aria-label="Benchmark category"><option value="">All seven categories · 30 questions</option><option>Explanation</option><option>Code Retrieval</option><option>Dependency Understanding</option><option>Bug Analysis</option><option>Code Generation</option><option>Refactoring</option><option>RAG-based Question</option></select><button id="benchmarkButton" class="button primary" type="button">Run selected benchmark</button></div><p id="benchmarkStatus" class="benchmark-status">Loading the latest category report…</p><div class="table-scroll"><table class="benchmark-table"><thead><tr><th>Category</th><th>Winner</th><th>Model</th><th>Quality</th><th>Correctness</th><th>Retrieval / code</th><th>Guard pass</th><th>Latency</th><th>Tokens</th></tr></thead><tbody id="benchmarkRows"><tr><td colspan="9" class="empty">Loading benchmark data…</td></tr></tbody></table></div></section>
+    <section id="guardrails" class="card panel"><div class="panel-head"><div><h2>Guardrails and output acceptance</h2><p>Blocked inputs never reach retrieval or Ollama. Generated answers are tested for relevance, evidence support, prompt leakage, credentials, and required format before they can be accepted.</p></div><span id="guardrailBadge" class="badge">CHECKING</span></div><div id="guardrailList" class="guardrail-list"><div class="empty">Loading guardrail demonstration…</div></div></section>
   </main><footer class="footer">DevPulse Nexus · Live developer environment intelligence</footer>
   <script>
     const byId=id=>document.getElementById(id); const escapeHtml=value=>String(value??"").replace(/[&<>'"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#039;",'"':"&quot;"}[c]));
@@ -124,6 +126,120 @@
     async function pollJob(id){try{const job=await json(`/comparison-jobs/${id}`);updateJob(job);if(job.state==="complete"){clearInterval(pollTimer);renderResult(job.result);return}if(job.state==="failed"){clearInterval(pollTimer);byId("comparisonSummary").classList.add("show");byId("comparisonSummary").textContent="Comparison failed: "+job.error;return}}catch(error){clearInterval(pollTimer);byId("eventLog").textContent="Status check failed: "+error.message}}
     byId("comparisonMode").addEventListener("change",event=>{byId("comparisonModeHint").textContent=event.target.value==="thorough"?"Thorough: each request receives a direct answer, evidence, and caveat; it takes longer on local CPU.":"Fast: one complete direct sentence per request for the quickest reliable comparison."});byId("compareButton").addEventListener("click",async()=>{const question=byId("compareQuestion").value.trim(),mode=byId("comparisonMode").value;if(!question)return;const button=byId("compareButton");button.disabled=true;byId("comparisonGrid").innerHTML="";byId("comparisonSummary").classList.remove("show");byId("evidence").classList.remove("show");try{const job=await json("/comparison-jobs",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({question,mode})});await pollJob(job.id);clearInterval(pollTimer);pollTimer=setInterval(()=>pollJob(job.id),1500)}catch(error){byId("eventLog").textContent="Unable to start comparison: "+error.message;button.disabled=false;return}const enable=()=>{button.disabled=false};const observer=setInterval(()=>{if(byId("compareBadge").textContent==="COMPLETE"||byId("compareBadge").textContent==="FAILED"){clearInterval(observer);enable()}},500)});
     refresh();setInterval(refresh,15000);
+  </script>
+  <script>
+    (() => {
+      const metric = (value, suffix = "") => value == null || Number.isNaN(Number(value)) ? "N/A" : `${Number(value).toFixed(1)}${suffix}`;
+      const modelMetrics = entry => entry?.models || Object.fromEntries(
+        Object.entries(entry || {}).filter(([, value]) => value && typeof value === "object" &&
+          ("correctness_percent" in value || "quality_score_percent" in value || "quality" in value))
+      );
+      const historicalMetrics = value => ({
+        quality_score_percent: value?.quality?.correctness_percent,
+        correctness_percent: value?.quality?.correctness_percent,
+        retrieval_support_percent: value?.quality?.concept_coverage_percent,
+        output_guard_pass_rate: null,
+        average_latency_seconds: value?.performance?.average_latency_seconds,
+        average_response_tokens: value?.performance?.average_output_tokens,
+      });
+
+      function showBenchmark(payload) {
+        const badge = byId("benchmarkBadge"), status = byId("benchmarkStatus"), body = byId("benchmarkRows");
+        if (!payload?.available && !payload?.categories) {
+          badge.textContent = "NO REPORT"; badge.className = "badge warning";
+          status.textContent = "No benchmark report exists yet. Run a category to generate one.";
+          body.innerHTML = '<tr><td colspan="9" class="empty">No category benchmark is available.</td></tr>';
+          return;
+        }
+        const report = payload.report || payload;
+        const isHistorical = payload.kind === "historical_week4";
+        const categories = report.categories || {};
+        const rows = [];
+        Object.entries(categories).forEach(([category, entry]) => {
+          const models = modelMetrics(entry);
+          const winner = entry?.winner || "Historical report: no computed category winner";
+          Object.entries(models).forEach(([model, original]) => {
+            const values = isHistorical ? historicalMetrics(original) : original;
+            const retrievalOrCode = category === "Code Generation"
+              ? values.static_code_validation_pass_rate
+              : values.retrieval_support_percent;
+            rows.push(`<tr><td>${escapeHtml(category)}</td><td><strong>${escapeHtml(model === winner ? modelLabel(winner) : "—")}</strong></td><td>${escapeHtml(modelLabel(model))}</td><td>${metric(values.quality_score_percent, "%")}</td><td>${metric(values.correctness_percent, "%")}</td><td>${metric(retrievalOrCode, "%")}</td><td>${metric(values.output_guard_pass_rate, "%")}</td><td>${metric(values.average_latency_seconds, "s")}</td><td>${metric(values.average_response_tokens)}</td></tr>`);
+          });
+        });
+        body.innerHTML = rows.length ? rows.join("") : '<tr><td colspan="9" class="empty">The report contains no category results.</td></tr>';
+        const methods = report.methodology || {};
+        const questionCount = methods.question_count || methods.questions || "the selected";
+        badge.textContent = isHistorical ? "WEEK 4 HISTORY" : "LIVE REPORT";
+        badge.className = "badge" + (isHistorical ? " warning" : "");
+        status.textContent = isHistorical
+          ? `Historical Week 4 data: ${questionCount} shared questions / ${methods.evaluation_records || "recorded"} model evaluations. Run a selected category to create a current live report with guard and retrieval metrics.`
+          : `Live report: ${questionCount} shared questions; ${methods.evaluation_count || 0} model evaluations. Each category has its own winner.`;
+      }
+
+      // Guarded comparison jobs deliberately contain no model cards.  Render
+      // the controlled response prominently instead of treating it as a
+      // failed comparison or a model-selection result.
+      const originalRenderResult = window.renderResult;
+      window.renderResult = function (result) {
+        if (result?.guardrail?.blocked) {
+          const decision = result.guardrail;
+          const summary = byId("comparisonSummary");
+          byId("compareBadge").textContent = "FAILED";
+          byId("compareBadge").className = "badge error";
+          byId("eventLog").textContent = "Request rejected before retrieval or model inference.";
+          summary.classList.add("show");
+          summary.innerHTML = `<strong>Request rejected by guardrail.</strong><div>${escapeHtml(decision.message || "This request was not sent to a model.")}</div><div class="decision-note">Check: ${escapeHtml(decision.code || "policy")}. No retrieval, Sourcegraph query, or Ollama inference was run.</div>`;
+          byId("comparisonGrid").innerHTML = "";
+          byId("evidence").classList.remove("show");
+          return;
+        }
+        return originalRenderResult(result);
+      };
+
+      async function loadBenchmark() {
+        try { showBenchmark(await json("/benchmark-report")); }
+        catch (error) { showBenchmark(null); byId("benchmarkStatus").textContent = "Could not load benchmark data: " + error.message; }
+      }
+
+      let benchmarkTimer;
+      async function pollBenchmark(id) {
+        try {
+          const job = await json(`/benchmark-jobs/${id}`);
+          const latest = (job.events || []).at(-1);
+          byId("benchmarkStatus").textContent = latest?.message || "Benchmark running…";
+          byId("benchmarkBadge").textContent = job.state.toUpperCase();
+          byId("benchmarkBadge").className = "badge" + (job.state === "failed" ? " error" : job.state === "complete" ? "" : " warning");
+          if (job.state === "complete") { clearInterval(benchmarkTimer); showBenchmark({available:true, kind:"live", report:job.result}); byId("benchmarkButton").disabled = false; }
+          if (job.state === "failed") { clearInterval(benchmarkTimer); byId("benchmarkStatus").textContent = "Benchmark failed: " + job.error; byId("benchmarkButton").disabled = false; }
+        } catch (error) { clearInterval(benchmarkTimer); byId("benchmarkStatus").textContent = "Benchmark status check failed: " + error.message; byId("benchmarkButton").disabled = false; }
+      }
+
+      byId("benchmarkButton").addEventListener("click", async () => {
+        const button = byId("benchmarkButton"), category = byId("benchmarkCategory").value;
+        button.disabled = true;
+        try {
+          const job = await json("/benchmark-jobs", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({categories: category ? [category] : null})});
+          await pollBenchmark(job.id);
+          clearInterval(benchmarkTimer);
+          benchmarkTimer = setInterval(() => pollBenchmark(job.id), 2000);
+        } catch (error) { button.disabled = false; byId("benchmarkStatus").textContent = "Could not start benchmark: " + error.message; }
+      });
+
+      async function loadGuardrails() {
+        const badge = byId("guardrailBadge"), list = byId("guardrailList");
+        try {
+          const data = await json("/guardrails/demo");
+          badge.textContent = "ENFORCED"; badge.className = "badge";
+          list.innerHTML = (data.cases || []).map(item => {
+            const protectedResult = item.with_guardrail || {};
+            return `<article class="guardrail-item"><strong>${escapeHtml(item.id.replaceAll("_", " "))}</strong><div>${escapeHtml(item.question)}</div><small>Without: ${escapeHtml(item.without_guardrail?.code || "would route")}</small><small>With: ${escapeHtml(protectedResult.allowed ? "allowed" : "blocked — " + protectedResult.code)}</small></article>`;
+          }).join("");
+        } catch (error) { badge.textContent = "UNAVAILABLE"; badge.className = "badge error"; list.innerHTML = `<div class="empty">Guardrail demo unavailable: ${escapeHtml(error.message)}</div>`; }
+      }
+
+      loadBenchmark();
+      loadGuardrails();
+    })();
   </script>
 </body>
 </html>

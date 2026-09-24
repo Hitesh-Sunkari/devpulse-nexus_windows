@@ -124,7 +124,13 @@ def _context_text(context):
     return "\n".join(values)
 
 
-def question_completion(question, answer, context):
+def question_completion(
+    question,
+    answer,
+    context,
+    response_truncated=False,
+    mode=None,
+):
     """Measure whether each explicit user request is materially addressed."""
     meaningful_answer = _answer_content(answer)
     answer_lower = meaningful_answer.lower()
@@ -186,7 +192,20 @@ def question_completion(question, answer, context):
 
     coverage = round(sum(item["score"] for item in details) / len(details), 1) if details else 0.0
     final_word = re.findall(r"[A-Za-z]+", meaningful_answer.lower())
-    appears_truncated = bool(final_word and final_word[-1] in DANGLING_ENDINGS)
+    terminal = meaningful_answer.rstrip()
+    # Fast mode promises a completed direct sentence.  A trailing comma,
+    # backtick, or missing sentence terminator is therefore an objective
+    # contract failure even when the final word is not in DANGLING_ENDINGS.
+    lacks_fast_terminator = bool(
+        mode == "fast" and terminal
+        and not re.search(r"[.!?][\"'\])}]*$", terminal)
+    )
+    appears_truncated = bool(
+        response_truncated
+        or (final_word and final_word[-1] in DANGLING_ENDINGS)
+        or terminal.endswith((",", ";", ":", "`", "(", "[", "-"))
+        or lacks_fast_terminator
+    )
     return {
         "coverage": coverage,
         "is_complete": bool(details) and all(item["addressed"] for item in details) and not appears_truncated,
@@ -313,17 +332,55 @@ def overall_score(scores, completion):
 def evaluate_response(question, category, response, context):
     answer = response.get("answer", "")
     reference = find_reference(question)
-    scores, completion, safety_details = category_scores(question, answer, context, reference)
+    completion = question_completion(
+        question,
+        answer,
+        context,
+        response_truncated=response.get("truncated", False),
+        mode=response.get("mode"),
+    )
+    scores, _, safety_details = category_scores(question, answer, context, reference)
+    # category_scores retains its public single-answer interface; replace the
+    # completion-derived fields with the response-aware result above.
+    if not completion["is_complete"]:
+        scores["Correctness"] = min(scores["Correctness"], 45.0)
+    scores["Relevance"] = completion["coverage"]
+    scores["Coverage"] = completion["coverage"]
+    scores["Completeness"] = round(
+        completion["coverage"] * 0.75
+        + (scores["Grounding"] or 0) * 0.15
+        + scores["Clarity"] * 0.10,
+        1,
+    )
     warnings = []
     missed = [part["question"] for part in completion["parts"] if not part["addressed"]]
     if missed:
         warnings.append("Did not address: " + "; ".join(missed))
     if completion["appears_truncated"]:
-        warnings.append("Answer appears to end mid-sentence")
+        warnings.append(
+            "Model reached its response limit before producing a complete answer."
+            if response.get("truncated")
+            else "Answer appears to end mid-sentence"
+        )
     if safety_details["contradictions"]:
         warnings.extend(safety_details["contradictions"])
     if safety_details["unsupported_numbers"]:
         warnings.append("Contains unsupported numeric claim(s): " + ", ".join(safety_details["unsupported_numbers"]))
+    contradiction_free = not safety_details["contradictions"]
+    output_validation = response.get("output_validation") or {"accepted": True, "failures": [], "warnings": []}
+    output_accepted = bool(output_validation.get("accepted"))
+    if not output_accepted:
+        warnings.append(
+            "Output guard rejected: " + ", ".join(output_validation.get("failures") or ["validation failure"])
+        )
+    for warning in output_validation.get("warnings") or []:
+        warnings.append("Output check: " + str(warning))
+    score = overall_score(scores, completion)
+    # A response that directly contradicts the deterministic diagnosis must
+    # never win, even if it is fluent and happens to mention every keyword.
+    # Cap its visible score as well so the UI does not imply high confidence.
+    if (not contradiction_free or not output_accepted) and score is not None:
+        score = min(score, 59.0)
     result = dict(response)
     result.update({
         "category": category,
@@ -333,9 +390,15 @@ def evaluate_response(question, category, response, context):
         "hallucination": round(100 - scores["Evidence safety"], 1),
         "coverage": scores["Coverage"],
         "correctness": scores["Correctness"],
-        "score": overall_score(scores, completion),
+        "score": score,
         "completion": completion,
-        "decision_eligible": completion["is_complete"] and not response.get("error"),
+        "decision_eligible": (
+            completion["is_complete"]
+            and contradiction_free
+            and output_accepted
+            and not response.get("error")
+        ),
+        "output_validation": output_validation,
         "evaluation_warnings": warnings,
         "evaluation_basis": "Reference-concept evaluation" if reference else "Deterministic completion and evidence-alignment indicators",
     })
